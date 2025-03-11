@@ -1,6 +1,7 @@
 #include <benchmark/benchmark.h>
 #include <vector>
 #include <cstdint>
+#include <cstring> 
 
 #include <omp.h>
 
@@ -553,6 +554,92 @@ static void BM_AOS_Merge(benchmark::State& state) {
     }
 }
 
+/**
+static void BM_AOS_nopushback_Merge(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos1, aos2;
+    SOA dummy(0); // Non utilisé ici
+    initialize_sorted_data(aos1, dummy, size, 0);   // 0, 2, 4, ...
+    initialize_sorted_data(aos2, dummy, size, 1);   // 1, 3, 5, ...
+
+    for (auto _ : state) {
+        std::vector<AOS> merged;
+        // Calculer la taille totale et préallouer avec resize
+        size_t total_size = aos1.size() + aos2.size();
+        merged.resize(total_size);
+
+        size_t i = 0, j = 0, k = 0; // k est l'indice dans merged
+        while (i < aos1.size() && j < aos2.size()) {
+            if (aos1[i].a <= aos2[j].a) {
+                merged[k] = aos1[i];
+                ++i;
+            } else {
+                merged[k] = aos2[j];
+                ++j;
+            }
+            ++k;
+        }
+        // Ajouter les éléments restants de aos1
+        while (i < aos1.size()) {
+            merged[k] = aos1[i];
+            ++i;
+            ++k;
+        }
+        // Ajouter les éléments restants de aos2
+        while (j < aos2.size()) {
+            merged[k] = aos2[j];
+            ++j;
+            ++k;
+        }
+        benchmark::DoNotOptimize(merged.data());
+    }
+}
+**/
+
+static void BM_AOS_nopushback_Merge(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos1, aos2;
+    SOA dummy(0); // Non utilisé ici
+    initialize_sorted_data(aos1, dummy, size, 0);   // 0, 2, 4, ...
+    initialize_sorted_data(aos2, dummy, size, 1);   // 1, 3, 5, ...
+
+    for (auto _ : state) {
+        std::vector<AOS> merged;
+        const size_t total_size = aos1.size() + aos2.size();
+        merged.resize(total_size);
+
+        // Optimisation 1: Pointeurs bruts
+        AOS* dest = merged.data();
+        const AOS* src1 = aos1.data();
+        const AOS* src2 = aos2.data();
+
+        size_t i = 0, j = 0;
+        const size_t size1 = aos1.size();
+        const size_t size2 = aos2.size();
+
+        // Fusion principale avec pointeurs
+        while (i < size1 && j < size2) {
+            if (src1[i].a <= src2[j].a) {
+                *dest++ = src1[i++];
+            } else {
+                *dest++ = src2[j++];
+            }
+        }
+
+        // Optimisation 2: Utilisation de memcpy pour les éléments restants
+        if (i < size1) {
+            const size_t remaining = size1 - i;
+            std::memcpy(dest, src1 + i, remaining * sizeof(AOS));
+        }
+        else if (j < size2) {
+            const size_t remaining = size2 - j;
+            std::memcpy(dest, src2 + j, remaining * sizeof(AOS));
+        }
+
+        benchmark::DoNotOptimize(merged.data());
+    }
+}
+
 // Benchmark : Fusion de deux SOA
 static void BM_SOA_Merge(benchmark::State& state) {
     size_t size = state.range(0);
@@ -598,7 +685,122 @@ static void BM_SOA_Merge(benchmark::State& state) {
     }
 }
 
+/**
+static void BM_SOA_nopushback_Merge(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> dummy1, dummy2; // Non utilisé ici
+    SOA soa1(0), soa2(0);
+    initialize_sorted_data(dummy1, soa1, size, 0);  // 0, 2, 4, ...
+    initialize_sorted_data(dummy2, soa2, size, 1);  // 1, 3, 5, ...
 
+    for (auto _ : state) {
+        SOA merged(0);
+        // Calculer la taille totale et préallouer avec resize
+        size_t total_size = soa1.a.size() + soa2.a.size();
+        merged.a.resize(total_size);
+        merged.b.resize(total_size);
+        merged.c.resize(total_size);
+
+        size_t i = 0, j = 0, k = 0; // k est l'indice dans merged
+        while (i < soa1.a.size() && j < soa2.a.size()) {
+            if (soa1.a[i] <= soa2.a[j]) {
+                merged.a[k] = soa1.a[i];
+                merged.b[k] = soa1.b[i];
+                merged.c[k] = soa1.c[i];
+                ++i;
+            } else {
+                merged.a[k] = soa2.a[j];
+                merged.b[k] = soa2.b[j];
+                merged.c[k] = soa2.c[j];
+                ++j;
+            }
+            ++k;
+        }
+        // Ajouter les éléments restants de soa1
+        while (i < soa1.a.size()) {
+            merged.a[k] = soa1.a[i];
+            merged.b[k] = soa1.b[i];
+            merged.c[k] = soa1.c[i];
+            ++i;
+            ++k;
+        }
+        // Ajouter les éléments restants de soa2
+        while (j < soa2.a.size()) {
+            merged.a[k] = soa2.a[j];
+            merged.b[k] = soa2.b[j];
+            merged.c[k] = soa2.c[j];
+            ++j;
+            ++k;
+        }
+        benchmark::DoNotOptimize(merged.a.data());
+    }
+}
+**/
+static void BM_SOA_nopushback_Merge(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> dummy1, dummy2; // Non utilisé
+    SOA soa1(0), soa2(0);
+    initialize_sorted_data(dummy1, soa1, size, 0);  // 0, 2, 4, ...
+    initialize_sorted_data(dummy2, soa2, size, 1);  // 1, 3, 5, ...
+
+    for (auto _ : state) {
+        SOA merged(0);
+        const size_t total_size = soa1.a.size() + soa2.a.size();
+
+        // Préallocation
+        merged.a.resize(total_size);
+        merged.b.resize(total_size);
+        merged.c.resize(total_size);
+
+        // Optimisation 1: Pointeurs bruts pour éviter les vérifications d'index
+        auto* dest_a = merged.a.data();
+        auto* dest_b = merged.b.data();
+        auto* dest_c = merged.c.data();
+
+        const auto* src1_a = soa1.a.data();
+        const auto* src1_b = soa1.b.data();
+        const auto* src1_c = soa1.c.data();
+
+        const auto* src2_a = soa2.a.data();
+        const auto* src2_b = soa2.b.data();
+        const auto* src2_c = soa2.c.data();
+
+        size_t i = 0, j = 0;
+        const size_t size1 = soa1.a.size();
+        const size_t size2 = soa2.a.size();
+
+        // Optimisation 2: Fusion principale avec moins d'opérations par itération
+        while (i < size1 && j < size2) {
+            if (src1_a[i] <= src2_a[j]) {
+                *dest_a++ = *src1_a++;
+                *dest_b++ = *src1_b++;
+                *dest_c++ = *src1_c++;
+                ++i;
+            } else {
+                *dest_a++ = *src2_a++;
+                *dest_b++ = *src2_b++;
+                *dest_c++ = *src2_c++;
+                ++j;
+            }
+        }
+
+        // Optimisation 3: Utilisation de memcpy pour les éléments restants
+        if (i < size1) {
+            const size_t remaining = size1 - i;
+            std::memcpy(dest_a, src1_a + i, remaining * sizeof(*src1_a));
+            std::memcpy(dest_b, src1_b + i, remaining * sizeof(*src1_b));
+            std::memcpy(dest_c, src1_c + i, remaining * sizeof(*src1_c));
+        }
+        else if (j < size2) {
+            const size_t remaining = size2 - j;
+            std::memcpy(dest_a, src2_a + j, remaining * sizeof(*src2_a));
+            std::memcpy(dest_b, src2_b + j, remaining * sizeof(*src2_b));
+            std::memcpy(dest_c, src2_c + j, remaining * sizeof(*src2_c));
+        }
+
+        benchmark::DoNotOptimize(merged.a.data());
+    }
+}
 
 BENCHMARK(BM_AOS_Read)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_raw_Read)->Range(1000, 1000000);
@@ -625,6 +827,9 @@ BENCHMARK(BM_AOS_raw_FilterCopy)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_FilterCopy)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_raw_FilterCopy)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_Merge)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_nopushback_Merge)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_Merge)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_nopushback_Merge)->Range(1000, 1000000);
+
 
 BENCHMARK_MAIN();
