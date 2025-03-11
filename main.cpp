@@ -156,11 +156,219 @@ static void BM_SOA_Compute(benchmark::State& state) {
     }
 }
 
+
+// Benchmark : Calculs avec stockage dans un std::vector (AOS)
+static void BM_AOS_ComputeVector(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    std::vector<int> results(size);
+
+    for (auto _ : state) {
+        size_t i = 0;
+        for (const auto& elem : aos) {
+            results[i++] = elem.a * elem.b + elem.c;
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+// Benchmark : Calculs avec stockage dans un std::vector (SOA)
+static void BM_SOA_ComputeVector(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    std::vector<int> results(size);
+
+    for (auto _ : state) {
+        size_t i = 0;
+        for (const auto elem : soa) {
+            results[i++] = elem.a * elem.b + elem.c;
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+// Nouveau Benchmark : Calculs avec push_back (AOS)
+static void BM_AOS_ComputePushBack(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+
+    for (auto _ : state) {
+        std::vector<int> results;
+        for (const auto& elem : aos) {
+            results.push_back(elem.a * elem.b + elem.c);
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+// Nouveau Benchmark : Calculs avec push_back (SOA)
+static void BM_SOA_ComputePushBack(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+
+    for (auto _ : state) {
+        std::vector<int> results;
+        for (const auto elem : soa) {
+            results.push_back(elem.a * elem.b + elem.c);
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+
+// Nouveau Benchmark : Transformation conditionnelle (AOS)
+static void BM_AOS_ConditionalTransform(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    std::vector<int> results(size);
+
+    for (auto _ : state) {
+        size_t i = 0;
+        for (const auto& elem : aos) {
+            if (elem.a > elem.b) {
+                results[i++] = elem.c * 2;
+            } else {
+                results[i++] = elem.c + 1;
+            }
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+// Nouveau Benchmark : Transformation conditionnelle (SOA)
+static void BM_SOA_ConditionalTransform(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    std::vector<int> results(size);
+
+    for (auto _ : state) {
+        size_t i = 0;
+        for (const auto elem : soa) {
+            if (elem.a > elem.b) {
+                results[i++] = elem.c * 2;
+            } else {
+                results[i++] = elem.c + 1;
+            }
+        }
+        benchmark::DoNotOptimize(results.data());
+    }
+}
+
+// Nouveau Benchmark : Recherche linéaire (AOS)
+static void BM_AOS_LinearSearch(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    const int target = (int)(size/2); // Valeur cible à rechercher
+
+
+    for (auto _ : state) {
+        size_t found_index = size; // Par défaut, non trouvé
+        for (size_t i = 0; i < aos.size(); ++i) {
+            if (aos[i].a == target) {
+                found_index = i;
+                break;
+            }
+        }
+        benchmark::DoNotOptimize(found_index);
+    }
+}
+
+// Nouveau Benchmark : Recherche linéaire (SOA)
+static void BM_SOA_LinearSearch(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+    const int target = (int)(size/2); // Valeur cible à rechercher
+
+    for (auto _ : state) {
+        size_t found_index = size; // Par défaut, non trouvé
+        size_t i = 0;
+        for (const auto elem : soa) {
+            if (elem.a == target) {
+                found_index = i;
+                break;
+            }
+            ++i;
+        }
+        benchmark::DoNotOptimize(found_index);
+    }
+}
+
+// Nouveau Benchmark : Filtrage avec copie (AOS)
+static void BM_AOS_FilterCopy(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+
+    for (auto _ : state) {
+        std::vector<AOS> filtered;
+        filtered.reserve(size / 2); // Estimation pour réduire les réallocations
+        for (const auto& elem : aos) {
+            if (elem.a < elem.b) {
+                filtered.push_back(elem);
+            }
+        }
+        benchmark::DoNotOptimize(filtered.data());
+    }
+}
+
+// Nouveau Benchmark : Filtrage avec copie (SOA)
+static void BM_SOA_FilterCopy(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA soa(0);
+    initialize_data(aos, soa, size);
+
+    for (auto _ : state) {
+        SOA filtered(0);
+        filtered.a.reserve(size / 2); // Estimation pour réduire les réallocations
+        filtered.b.reserve(size / 2);
+        filtered.c.reserve(size / 2);
+        for (const auto elem : soa) {
+            if (elem.a < elem.b) {
+                filtered.a.push_back(elem.a);
+                filtered.b.push_back(elem.b);
+                filtered.c.push_back(elem.c);
+            }
+        }
+        benchmark::DoNotOptimize(filtered.a.data());
+    }
+}
+
+
+
 BENCHMARK(BM_AOS_Read)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_Read)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_Write)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_Write)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_Compute)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_Compute)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_ComputeVector)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_ComputeVector)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_ComputePushBack)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_ComputePushBack)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_ConditionalTransform)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_ConditionalTransform)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_LinearSearch)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_LinearSearch)->Range(1000, 1000000);
+BENCHMARK(BM_AOS_FilterCopy)->Range(1000, 1000000);
+BENCHMARK(BM_SOA_FilterCopy)->Range(1000, 1000000);
+
 
 BENCHMARK_MAIN();
