@@ -1,16 +1,16 @@
 # AOS vs SOA iterators
 
-This project compares the performance of iterators using Array off Structures (AOS) implementation with a Structure of Arrays (SOA) implementation The tests measure performance for different operations (reading, writing, compute).
+This project compares the performance of **iterators** using **Array of Structures** (AOS) implementation with a **Structure of Arrays** (SOA) implementation The tests measure performance for different operations (reading, writing, compute).
 
 ### Data Structures
-AOS: A std::vector containing structures with three int fields (a, b, c).
-SOA: Three separate std::vector<int> containers, one for each field (a, b, c), with a custom iterator using a proxy to mimic AOS-like access.
+**AOS**: A std::vector containing structures with three int fields (a, b, c).
+**SOA**: Three separate std::vector<int> containers, one for each field (a, b, c), with a custom iterator using a **proxy to mimic AOS-like access**.
 
 ### Tested Operations
 The benchmarks evaluate the following operations:
-- Simple Read (BM_AOS_Read and BM_SOA_Read): Computes the sum of fields a, b, and c for each element.
-- Write (BM_AOS_Write and BM_SOA_Write): Increments the fields a, b, and c for each element.
-- Compute (BM_AOS_Compute and BM_SOA_Compute): compute the sum of the fields a, b, c for each element.
+- **Simple Read** (BM_AOS_Read and BM_SOA_Read): Computes the sum of fields a, b, and c for each element.
+- **Write** (BM_AOS_Write and BM_SOA_Write): Increments the fields a, b, and c for each element.
+- **Compute** (BM_AOS_Compute and BM_SOA_Compute): compute the sum of the fields a, b, c for each element.
 
 ### Benchmark Results
 Here are the results obtained for various data sizes:
