@@ -54,9 +54,44 @@ public:
     Iterator end() { return Iterator(this, a.size()); }
 };
 
-void initialize_data(std::vector<AOS>& aos, SOA& soa, size_t size) {
+
+class SOA2{
+public:
+    std::vector<int> a;
+    std::vector<int> b;
+    std::vector<int> c;
+
+    explicit SOA2(size_t size) : a(size), b(size), c(size) {}
+
+    class Iterator {
+        SOA2* soa;
+        size_t index;
+
+    public:
+        Iterator(SOA2* soa_, size_t index_) : soa(soa_), index(index_) {}
+
+        std::tuple<int&, int&, int&> operator*() {
+            return std::tie(soa->a[index], soa->b[index], soa->c[index]);
+        }
+
+        Iterator& operator++() {
+            ++index;
+            return *this;
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return index != other.index || soa != other.soa;
+        }
+    };
+
+    Iterator begin() { return Iterator(this, 0); }
+    Iterator end() { return Iterator(this, a.size()); }
+};
+
+template <typename S>
+void initialize_data(std::vector<AOS>& aos, S& soa, size_t size) {
     aos.resize(size);
-    soa = SOA(size);
+    soa = S(size);
     for (size_t i = 0; i < size; ++i) {
         aos[i].a = static_cast<int>(i);
         aos[i].b = static_cast<int>(i + 1);
@@ -113,6 +148,23 @@ static void BM_SOA_Read(benchmark::State& state) {
         benchmark::DoNotOptimize(sum);
     }
 }
+
+static void BM_SOA2_Read(benchmark::State& state) {
+    size_t size = state.range(0);
+    std::vector<AOS> aos;
+    SOA2 soa(0);
+    initialize_data(aos, soa, size);
+
+    for (auto _ : state) {
+        int sum = 0;
+        for (auto it = soa.begin(); it != soa.end(); ++it) {
+            auto [a, b, c] = *it;  // Structured bindings pour accéder aux champs
+            sum += a + b + c;
+        }	    
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
 
 static void BM_SOA_raw_Read(benchmark::State& state) {
     size_t size = state.range(0);
@@ -805,6 +857,7 @@ static void BM_SOA_nopushback_Merge(benchmark::State& state) {
 BENCHMARK(BM_AOS_Read)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_raw_Read)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_Read)->Range(1000, 1000000);
+BENCHMARK(BM_SOA2_Read)->Range(1000, 1000000);
 BENCHMARK(BM_SOA_raw_Read)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_Write)->Range(1000, 1000000);
 BENCHMARK(BM_AOS_raw_Write)->Range(1000, 1000000);
