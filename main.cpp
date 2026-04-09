@@ -1325,6 +1325,53 @@ static void BM_AoSoA_v2_Compute_uN(benchmark::State& state) {
     }
 }
 
+// ---- Act 5: multi-stream variants (Agent H) — K far-apart segments ----
+
+template<size_t K, size_t B, typename... Ts>
+static void BM_AoSoA_v2_Read_ms(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    using result_t = common_t<Ts...>;
+    for (auto _ : state) {
+        result_t sum = 0;
+        aosoa.template for_each_multistream<K>([&](auto&... xs) {
+            sum += (static_cast<result_t>(xs) + ...);
+        });
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
+template<size_t K, size_t B, typename... Ts>
+static void BM_AoSoA_v2_Compute_ms(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    using result_t = common_t<Ts...>;
+    for (auto _ : state) {
+        result_t result = 0;
+        aosoa.template for_each_multistream<K>([&]<typename... Xs>(Xs&... xs) {
+            constexpr size_t N = sizeof...(Xs);
+            if constexpr (N == 1) {
+                result += (static_cast<result_t>(xs) + ...);
+            } else if constexpr (N == 2) {
+                result_t head = 1;
+                ((head *= static_cast<result_t>(xs)), ...);
+                result += head;
+            } else {
+                auto args = std::forward_as_tuple(xs...);
+                result_t head = static_cast<result_t>(std::get<0>(args)) *
+                                static_cast<result_t>(std::get<1>(args));
+                result_t tail = [&]<size_t... Js>(std::index_sequence<Js...>) {
+                    return (static_cast<result_t>(std::get<Js + 2>(args)) + ...);
+                }(std::make_index_sequence<N - 2>{});
+                result += head + tail;
+            }
+        });
+        benchmark::DoNotOptimize(result);
+    }
+}
+
 // ---- Act 4: AVX2 intrinsic variants (Agent G) — float-only, B=16 ----
 
 #if AOSOA_HAS_AVX2
@@ -1490,6 +1537,20 @@ BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_avx2,    16, float, float, float, float, flo
 BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_avx2, 16, float, float, float, float, float, float, float, float)
     ->Name("AoSoA16_v2_Compute_avx2/float8")->Range(1000, 1000000);
 #endif
+
+// Act 5: multi-stream for_each (Agent H) — K far-apart segments
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_ms,    2, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Read_ms_k2/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_ms,    4, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Read_ms_k4/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_ms,    8, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Read_ms_k8/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_ms, 2, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Compute_ms_k2/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_ms, 4, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Compute_ms_k4/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_ms, 8, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Compute_ms_k8/float8")->Range(1000, 1000000);
 
 // Same opt-in variants for float3 at B=64 (the best B for that config)
 BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_uN,    4, 64, float, float, float)

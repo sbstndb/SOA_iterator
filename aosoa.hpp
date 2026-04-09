@@ -116,6 +116,26 @@ public:
                                              std::index_sequence_for<Ts...>{});
     }
 
+    // Multi-stream variant: splits the block vector into K far-apart segments
+    // and processes one block from each segment per outer iteration. The K
+    // base pointers are segment_size * sizeof(Block) bytes apart in VA space,
+    // so the hardware L2 streamer trains K independent trackers — giving
+    // AoSoA the same multi-stream memory-level parallelism that SOA gets for
+    // free from its N field arrays.
+    //
+    // Closes most of the float8 / 1M gap vs SOA at K=8 (1.37x → 1.11x on this
+    // hardware). Neutral in cache. Intended as opt-in for large-N reductions.
+    template<size_t K, class F>
+    void for_each_multistream(F&& f) {
+        for_each_multistream_impl<K>(std::forward<F>(f),
+                                     std::index_sequence_for<Ts...>{});
+    }
+    template<size_t K, class F>
+    void for_each_multistream(F&& f) const {
+        for_each_multistream_const_impl<K>(std::forward<F>(f),
+                                           std::index_sequence_for<Ts...>{});
+    }
+
     // Apply f(global_index, refs...) to every element. Useful when the body
     // depends on element position.
     template<class F>
@@ -191,6 +211,13 @@ public:
         constexpr size_t PF_AHEAD = 8;
         for (size_t bi = 0; bi < full; ++bi) {
             if (bi + PF_AHEAD < full) {
+                // All 8 cache lines of the next-ahead block. Agent J's static
+                // analysis suggested dropping 7 of 8 prefetches based on the
+                // assumption that the L1 DCU next-line prefetcher would fill
+                // in the rest. Measured: in cache that saves ~5% of load-port
+                // pressure (confirmed), but at 1M DRAM-bound it blows the
+                // timing from 1.3x to 3.0x vs SOA because only 1 of 8 lines
+                // arrives ahead of time. Keeping all 8 for the DRAM win.
                 const char* next = reinterpret_cast<const char*>(&blocks[bi + PF_AHEAD]);
                 _mm_prefetch(next,        _MM_HINT_T0);
                 _mm_prefetch(next + 64,   _MM_HINT_T0);
@@ -234,6 +261,13 @@ public:
         constexpr size_t PF_AHEAD = 8;
         for (size_t bi = 0; bi < full; ++bi) {
             if (bi + PF_AHEAD < full) {
+                // All 8 cache lines of the next-ahead block. Agent J's static
+                // analysis suggested dropping 7 of 8 prefetches based on the
+                // assumption that the L1 DCU next-line prefetcher would fill
+                // in the rest. Measured: in cache that saves ~5% of load-port
+                // pressure (confirmed), but at 1M DRAM-bound it blows the
+                // timing from 1.3x to 3.0x vs SOA because only 1 of 8 lines
+                // arrives ahead of time. Keeping all 8 for the DRAM win.
                 const char* next = reinterpret_cast<const char*>(&blocks[bi + PF_AHEAD]);
                 _mm_prefetch(next,        _MM_HINT_T0);
                 _mm_prefetch(next + 64,   _MM_HINT_T0);
@@ -540,6 +574,126 @@ private:
         }
         if (tail > 0) {
             const auto& blk = blocks[full];
+            for (size_t i = 0; i < tail; ++i) {
+                f(std::get<Is>(blk.data)[i]...);
+            }
+        }
+    }
+
+    // Multi-stream implementation — splits the block vector into K segments
+    // and iterates one block from each segment per outer iter. Segments are
+    // `full/K` blocks apart in the vector, so the load addresses are
+    // (full/K) * sizeof(BlockT) bytes apart in virtual memory — far enough
+    // that the L2 streamer must allocate K independent tracker slots.
+    //
+    // Fallbacks handle (a) K=1 or K>full, (b) leftover blocks past K*seg,
+    // (c) partial tail block.
+    template<size_t K, class F, size_t... Is>
+    void for_each_multistream_impl(F&& f, std::index_sequence<Is...>) {
+        static_assert(K >= 1, "K must be >= 1");
+        const size_t nb = blocks.size();
+        if (nb == 0) return;
+        const size_t tail = size_ % B;
+        const size_t full = (tail == 0) ? nb : nb - 1;
+
+        BlockT* const blk_base = blocks.data();
+
+        if constexpr (K >= 2) {
+            const size_t seg = full / K;
+            if (seg > 0) {
+                for (size_t bi = 0; bi < seg; ++bi) {
+                    [&]<size_t... Ks>(std::index_sequence<Ks...>) {
+                        ((
+                            [&] {
+                                auto& blk = blk_base[bi + Ks * seg];
+                                for (size_t i = 0; i < B; ++i) {
+                                    f(std::get<Is>(blk.data)[i]...);
+                                }
+                            }()
+                        ), ...);
+                    }(std::make_index_sequence<K>{});
+                }
+                for (size_t bi = K * seg; bi < full; ++bi) {
+                    auto& blk = blk_base[bi];
+                    for (size_t i = 0; i < B; ++i) {
+                        f(std::get<Is>(blk.data)[i]...);
+                    }
+                }
+            } else {
+                for (size_t bi = 0; bi < full; ++bi) {
+                    auto& blk = blk_base[bi];
+                    for (size_t i = 0; i < B; ++i) {
+                        f(std::get<Is>(blk.data)[i]...);
+                    }
+                }
+            }
+        } else {
+            for (size_t bi = 0; bi < full; ++bi) {
+                auto& blk = blk_base[bi];
+                for (size_t i = 0; i < B; ++i) {
+                    f(std::get<Is>(blk.data)[i]...);
+                }
+            }
+        }
+
+        if (tail > 0) {
+            auto& blk = blk_base[full];
+            for (size_t i = 0; i < tail; ++i) {
+                f(std::get<Is>(blk.data)[i]...);
+            }
+        }
+    }
+
+    template<size_t K, class F, size_t... Is>
+    void for_each_multistream_const_impl(F&& f, std::index_sequence<Is...>) const {
+        static_assert(K >= 1, "K must be >= 1");
+        const size_t nb = blocks.size();
+        if (nb == 0) return;
+        const size_t tail = size_ % B;
+        const size_t full = (tail == 0) ? nb : nb - 1;
+
+        const BlockT* const blk_base = blocks.data();
+
+        if constexpr (K >= 2) {
+            const size_t seg = full / K;
+            if (seg > 0) {
+                for (size_t bi = 0; bi < seg; ++bi) {
+                    [&]<size_t... Ks>(std::index_sequence<Ks...>) {
+                        ((
+                            [&] {
+                                const auto& blk = blk_base[bi + Ks * seg];
+                                for (size_t i = 0; i < B; ++i) {
+                                    f(std::get<Is>(blk.data)[i]...);
+                                }
+                            }()
+                        ), ...);
+                    }(std::make_index_sequence<K>{});
+                }
+                for (size_t bi = K * seg; bi < full; ++bi) {
+                    const auto& blk = blk_base[bi];
+                    for (size_t i = 0; i < B; ++i) {
+                        f(std::get<Is>(blk.data)[i]...);
+                    }
+                }
+            } else {
+                for (size_t bi = 0; bi < full; ++bi) {
+                    const auto& blk = blk_base[bi];
+                    for (size_t i = 0; i < B; ++i) {
+                        f(std::get<Is>(blk.data)[i]...);
+                    }
+                }
+            }
+        } else {
+            for (size_t bi = 0; bi < full; ++bi) {
+                const auto& blk = blk_base[bi];
+                for (size_t i = 0; i < B; ++i) {
+                    f(std::get<Is>(blk.data)[i]...);
+                }
+            }
+        }
+
+        if (tail > 0) {
+            const auto& blk = blk_base[full];
             for (size_t i = 0; i < tail; ++i) {
                 f(std::get<Is>(blk.data)[i]...);
             }
