@@ -1386,29 +1386,41 @@ REGISTER_SEARCH_BENCHMARKS("double3", 0, double, double, double)
 // AoSoA registrations: 4 type configs x 4 block sizes
 // ============================================================================
 
-// float3 with B=4,8,16,64
-REGISTER_AOSOA_BENCHMARKS("float3", 4, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float3", 8, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float3", 16, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float3", 64, float, float, float)
+// float3 with B ∈ {2, 4, 8, 16, 32, 64, 128}
+REGISTER_AOSOA_BENCHMARKS("float3", 2,   float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 4,   float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 8,   float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 16,  float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 32,  float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 64,  float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 128, float, float, float)
 
-// float8 with B=4,8,16,64
-REGISTER_AOSOA_BENCHMARKS("float8", 4, float, float, float, float, float, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float8", 8, float, float, float, float, float, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float8", 16, float, float, float, float, float, float, float, float)
-REGISTER_AOSOA_BENCHMARKS("float8", 64, float, float, float, float, float, float, float, float)
+// float8 with B ∈ {2, 4, 8, 16, 32, 64, 128}
+REGISTER_AOSOA_BENCHMARKS("float8", 2,   float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 4,   float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 8,   float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 16,  float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 32,  float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 64,  float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 128, float, float, float, float, float, float, float, float)
 
-// double3 with B=4,8,16,64
-REGISTER_AOSOA_BENCHMARKS("double3", 4, double, double, double)
-REGISTER_AOSOA_BENCHMARKS("double3", 8, double, double, double)
-REGISTER_AOSOA_BENCHMARKS("double3", 16, double, double, double)
-REGISTER_AOSOA_BENCHMARKS("double3", 64, double, double, double)
+// double3 with B ∈ {2, 4, 8, 16, 32, 64, 128}
+REGISTER_AOSOA_BENCHMARKS("double3", 2,   double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 4,   double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 8,   double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 16,  double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 32,  double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 64,  double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 128, double, double, double)
 
-// int_float_double with B=4,8,16,64
-REGISTER_AOSOA_BENCHMARKS("int_float_double", 4, int, float, double)
-REGISTER_AOSOA_BENCHMARKS("int_float_double", 8, int, float, double)
-REGISTER_AOSOA_BENCHMARKS("int_float_double", 16, int, float, double)
-REGISTER_AOSOA_BENCHMARKS("int_float_double", 64, int, float, double)
+// int_float_double with B ∈ {2, 4, 8, 16, 32, 64, 128}
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 2,   int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 4,   int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 8,   int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 16,  int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 32,  int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 64,  int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 128, int, float, double)
 
 // AoSoA LinearSearch benchmarks (searching on field 0)
 REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 4, float, float, float)

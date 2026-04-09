@@ -350,3 +350,16 @@ private:
         ((std::get<Is>(b.data)[off] = std::get<Is>(t)), ...);
     }
 };
+
+// Recommended default block size.
+//
+// Empirical sweep across B ∈ {2, 4, 8, 16, 32, 64, 128}, 4 type configurations
+// (float3, float8, double3, int+float+double), 5 sizes (1K to 1M), 4 ops
+// (Read, Write, Compute, FilterCopy) on Intel Core Ultra 7 (12 MiB L3, AVX2).
+//
+// B=16 minimizes geometric-mean slowdown across all 80 workloads (1.097x vs
+// oracle best-B), has the lowest worst-case (1.79x) of any single default,
+// and wins 30/80 cells outright — more than any other B. Detailed study:
+// see the SOA vs AoSoA blog post.
+template<typename... Ts>
+using AoSoAd = AoSoA<16, Ts...>;
