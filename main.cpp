@@ -1825,4 +1825,134 @@ BENCHMARK(BM_Frame_SOA)     ->Name("Frame/SOA")     ->Range(10'000, 1'000'000);
 BENCHMARK(BM_Frame_AoSoA)   ->Name("Frame/AoSoA")   ->Range(10'000, 1'000'000);
 BENCHMARK(BM_Frame_AoSoA_ms)->Name("Frame/AoSoA_ms")->Range(10'000, 1'000'000);
 
+// ============================================================================
+// Case study #2: Pure N-body frame (no cull, no filter)
+//
+// Same particle shape but removes the FilterCopy step. Only runs:
+//   1. integrate(dt)
+//   2. kinetic_energy
+//
+// This is a fairer comparison of "pure read + write + reduce" without
+// the whole-object move that destroys SOA. It shows how each layout
+// compares when the workload is streaming-friendly all the way through.
+// ============================================================================
+
+static void BM_FramePure_AOS(benchmark::State& state) {
+    size_t n = state.range(0);
+    std::vector<ParticleAOS> particles;
+    init_particles_aos(particles, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        for (auto& p : particles) {
+            p.x    += p.vx * dt;
+            p.y    += p.vy * dt;
+            p.z    += p.vz * dt;
+            p.life -= dt;
+        }
+        float ke = 0;
+        for (const auto& p : particles) {
+            ke += 0.5f * p.mass * (p.vx*p.vx + p.vy*p.vy + p.vz*p.vz);
+        }
+        benchmark::DoNotOptimize(ke);
+    }
+}
+
+static void BM_FramePure_SOA(benchmark::State& state) {
+    size_t n = state.range(0);
+    SOA<float, float, float, float, float, float, float, float> soa;
+    soa.resize(n);
+    std::vector<ParticleAOS> tmp; init_particles_aos(tmp, n);
+    for (size_t i = 0; i < n; ++i) {
+        std::get<0>(soa.arrays)[i] = tmp[i].x;
+        std::get<1>(soa.arrays)[i] = tmp[i].y;
+        std::get<2>(soa.arrays)[i] = tmp[i].z;
+        std::get<3>(soa.arrays)[i] = tmp[i].vx;
+        std::get<4>(soa.arrays)[i] = tmp[i].vy;
+        std::get<5>(soa.arrays)[i] = tmp[i].vz;
+        std::get<6>(soa.arrays)[i] = tmp[i].mass;
+        std::get<7>(soa.arrays)[i] = tmp[i].life;
+    }
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        auto& X  = std::get<0>(soa.arrays);
+        auto& Y  = std::get<1>(soa.arrays);
+        auto& Z  = std::get<2>(soa.arrays);
+        auto& VX = std::get<3>(soa.arrays);
+        auto& VY = std::get<4>(soa.arrays);
+        auto& VZ = std::get<5>(soa.arrays);
+        auto& M  = std::get<6>(soa.arrays);
+        auto& LF = std::get<7>(soa.arrays);
+        for (size_t i = 0; i < n; ++i) {
+            X[i]  += VX[i] * dt;
+            Y[i]  += VY[i] * dt;
+            Z[i]  += VZ[i] * dt;
+            LF[i] -= dt;
+        }
+        float ke = 0;
+        for (size_t i = 0; i < n; ++i) {
+            ke += 0.5f * M[i] * (VX[i]*VX[i] + VY[i]*VY[i] + VZ[i]*VZ[i]);
+        }
+        benchmark::DoNotOptimize(ke);
+    }
+}
+
+static void BM_FramePure_AoSoA(benchmark::State& state) {
+    size_t n = state.range(0);
+    using A = AoSoA<16, float, float, float, float, float, float, float, float>;
+    A aosoa;
+    init_particles_aosoa(aosoa, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        aosoa.for_each([dt](auto& x, auto& y, auto& z,
+                            auto& vx, auto& vy, auto& vz,
+                            auto& /*m*/, auto& life) {
+            x    += vx * dt;
+            y    += vy * dt;
+            z    += vz * dt;
+            life -= dt;
+        });
+        float ke = aosoa.reduce(0.0f, [](float acc,
+                                         auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                         auto& vx, auto& vy, auto& vz,
+                                         auto& m, auto& /*life*/) {
+            return acc + 0.5f * m * (vx*vx + vy*vy + vz*vz);
+        });
+        benchmark::DoNotOptimize(ke);
+    }
+}
+
+static void BM_FramePure_AoSoA_ms(benchmark::State& state) {
+    size_t n = state.range(0);
+    using A = AoSoA<16, float, float, float, float, float, float, float, float>;
+    A aosoa;
+    init_particles_aosoa(aosoa, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        aosoa.template for_each_multistream<8>([dt](auto& x, auto& y, auto& z,
+                                                     auto& vx, auto& vy, auto& vz,
+                                                     auto& /*m*/, auto& life) {
+            x    += vx * dt;
+            y    += vy * dt;
+            z    += vz * dt;
+            life -= dt;
+        });
+        float ke = aosoa.reduce(0.0f, [](float acc,
+                                         auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                         auto& vx, auto& vy, auto& vz,
+                                         auto& m, auto& /*life*/) {
+            return acc + 0.5f * m * (vx*vx + vy*vy + vz*vz);
+        });
+        benchmark::DoNotOptimize(ke);
+    }
+}
+
+BENCHMARK(BM_FramePure_AOS)     ->Name("FramePure/AOS")     ->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_SOA)     ->Name("FramePure/SOA")     ->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_AoSoA)   ->Name("FramePure/AoSoA")   ->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_AoSoA_ms)->Name("FramePure/AoSoA_ms")->Range(10'000, 1'000'000);
+
 BENCHMARK_MAIN();
