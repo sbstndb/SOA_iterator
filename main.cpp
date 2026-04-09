@@ -1011,6 +1011,45 @@ static void BM_AoSoA_Read(benchmark::State& state) {
     }
 }
 
+// ---- DIAGNOSIS: direct block-wise loop, no Iterator, no Proxy ----
+// If this matches SOA, the container is sane and the iterator abstraction
+// alone is the bottleneck. If it matches the iterator version, the layout
+// itself has problems.
+template<size_t B, typename... Ts>
+static void BM_AoSoA_direct_Read(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using result_t = common_t<Ts...>;
+    const size_t nblocks = aosoa.blocks.size();
+    const size_t tail = size % B;
+    const size_t full = (tail == 0) ? nblocks : nblocks - 1;
+
+    for (auto _ : state) {
+        result_t sum = 0;
+        for (size_t bi = 0; bi < full; ++bi) {
+            auto& blk = aosoa.blocks[bi];
+            // Inline unrolled: B iterations over N scalar fields.
+            // B is a compile-time constant, GCC should unroll + SIMD this.
+            [&]<size_t... Is>(std::index_sequence<Is...>) {
+                for (size_t i = 0; i < B; ++i) {
+                    sum += ((std::get<Is>(blk.data)[i]) + ...);
+                }
+            }(std::index_sequence_for<Ts...>{});
+        }
+        if (tail > 0) {
+            auto& blk = aosoa.blocks[full];
+            [&]<size_t... Is>(std::index_sequence<Is...>) {
+                for (size_t i = 0; i < tail; ++i) {
+                    sum += ((std::get<Is>(blk.data)[i]) + ...);
+                }
+            }(std::index_sequence_for<Ts...>{});
+        }
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
 template<size_t B, typename... Ts>
 static void BM_AoSoA_Write(benchmark::State& state) {
     size_t size = state.range(0);
@@ -1142,6 +1181,129 @@ static void BM_AoSoA_LinearSearch(benchmark::State& state) {
 }
 
 // ============================================================================
+// AoSoA v2: functional API (for_each / reduce / filter)
+// These benchmarks drive the new lambda-based surface. They should match SOA
+// speed in cache (the broken element iterator is bypassed entirely).
+// ============================================================================
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_Read(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using result_t = common_t<Ts...>;
+
+    for (auto _ : state) {
+        result_t sum = 0;
+        aosoa.for_each([&](auto&... xs) {
+            sum += (static_cast<result_t>(xs) + ...);
+        });
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_Write(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    for (auto _ : state) {
+        // Use for_each_indexed... no, that's global index.
+        // Use an index_sequence trick so each field gets its own +I+1 constant.
+        [&]<size_t... Is>(std::index_sequence<Is...>) {
+            aosoa.for_each([](auto&... xs) {
+                size_t k = 0;
+                ((xs += static_cast<std::decay_t<decltype(xs)>>(++k)), ...);
+            });
+        }(std::index_sequence_for<Ts...>{});
+        benchmark::ClobberMemory();
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_Compute(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using result_t = common_t<Ts...>;
+
+    for (auto _ : state) {
+        result_t result = 0;
+        // Use for_each with captured accumulator. The forwarded pack goes
+        // directly into the compute expression — no intermediate tuple — so
+        // GCC sees a clean fold per element and vectorizes.
+        aosoa.for_each([&]<typename... Xs>(Xs&... xs) {
+            constexpr size_t N = sizeof...(Xs);
+            if constexpr (N == 1) {
+                result += (static_cast<result_t>(xs) + ...);
+            } else if constexpr (N == 2) {
+                result_t head = 1;
+                ((head *= static_cast<result_t>(xs)), ...);
+                result += head;
+            } else {
+                // get<0>*get<1> + sum(get<2..N-1>)
+                auto args = std::forward_as_tuple(xs...);
+                result_t head = static_cast<result_t>(std::get<0>(args)) *
+                                static_cast<result_t>(std::get<1>(args));
+                result_t tail = [&]<size_t... Js>(std::index_sequence<Js...>) {
+                    return (static_cast<result_t>(std::get<Js + 2>(args)) + ...);
+                }(std::make_index_sequence<N - 2>{});
+                result += head + tail;
+            }
+        });
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_FilterCopy(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    for (auto _ : state) {
+        auto filtered = aosoa.filter([](auto&... xs) {
+            if constexpr (sizeof...(xs) >= 2) {
+                auto tup = std::forward_as_tuple(xs...);
+                return std::get<0>(tup) < std::get<1>(tup);
+            } else {
+                auto tup = std::forward_as_tuple(xs...);
+                return std::get<0>(tup) > 0;
+            }
+        });
+        benchmark::DoNotOptimize(filtered.blocks.data());
+    }
+}
+
+template<size_t FieldIndex, size_t B, typename... Ts>
+static void BM_AoSoA_v2_LinearSearch(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using FieldType = std::tuple_element_t<FieldIndex, std::tuple<Ts...>>;
+    const FieldType target = static_cast<FieldType>(size / 2 + FieldIndex);
+
+    for (auto _ : state) {
+        // Linear search via for_each_indexed with early-exit emulated by
+        // storing the found index in a captured variable. GCC cannot break
+        // out of a lambda-driven loop, so this walks to the end — which is
+        // a property of the functional API worth benchmarking honestly.
+        size_t found_index = size;
+        aosoa.for_each_indexed([&](size_t gi, auto&... xs) {
+            if (found_index == size) {
+                auto tup = std::forward_as_tuple(xs...);
+                if (std::get<FieldIndex>(tup) == target) found_index = gi;
+            }
+        });
+        benchmark::DoNotOptimize(found_index);
+    }
+}
+
+// ============================================================================
 // Benchmark Registration Macros
 // ============================================================================
 
@@ -1179,9 +1341,14 @@ static void BM_AoSoA_LinearSearch(benchmark::State& state) {
 
 #define REGISTER_AOSOA_BENCHMARKS(name, B, ...) \
     BENCHMARK_TEMPLATE(BM_AoSoA_Read, B, __VA_ARGS__)->Name("AoSoA" #B "_Read/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_direct_Read, B, __VA_ARGS__)->Name("AoSoA" #B "_direct_Read/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read, B, __VA_ARGS__)->Name("AoSoA" #B "_v2_Read/" name)->Range(1000, 1000000); \
     BENCHMARK_TEMPLATE(BM_AoSoA_Write, B, __VA_ARGS__)->Name("AoSoA" #B "_Write/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_v2_Write, B, __VA_ARGS__)->Name("AoSoA" #B "_v2_Write/" name)->Range(1000, 1000000); \
     BENCHMARK_TEMPLATE(BM_AoSoA_Compute, B, __VA_ARGS__)->Name("AoSoA" #B "_Compute/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute, B, __VA_ARGS__)->Name("AoSoA" #B "_v2_Compute/" name)->Range(1000, 1000000); \
     BENCHMARK_TEMPLATE(BM_AoSoA_FilterCopy, B, __VA_ARGS__)->Name("AoSoA" #B "_FilterCopy/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_v2_FilterCopy, B, __VA_ARGS__)->Name("AoSoA" #B "_v2_FilterCopy/" name)->Range(1000, 1000000); \
     BENCHMARK_TEMPLATE(BM_AoSoA_nopb_Merge, B, __VA_ARGS__)->Name("AoSoA" #B "_nopb_Merge/" name)->Range(1000, 1000000);
 
 #define REGISTER_AOSOA_SEARCH_BENCHMARKS(name, field_idx, B, ...) \
