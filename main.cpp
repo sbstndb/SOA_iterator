@@ -1582,4 +1582,247 @@ REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 8, float, float, float)
 REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 16, float, float, float)
 REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 64, float, float, float)
 
+// ============================================================================
+// Case study: N-body simulation frame
+//
+// Fields per particle: x, y, z, vx, vy, vz, mass, life (8 floats, 32 B)
+//
+// A "frame" does three things every step:
+//   1. integrate(dt)  — x += vx*dt; y += vy*dt; z += vz*dt; life -= dt
+//   2. kinetic_energy — sum 0.5 * mass * (vx² + vy² + vz²)
+//   3. cull_dead      — copy particles where life > 0 into a new container
+//
+// This is a realistic mix: read-heavy integrate, pure reduce, whole-object
+// filter. AOS is best at filter, SOA is best at reduce, AoSoA tries to be
+// reasonable at both. We measure the end-to-end frame time, not individual
+// ops.
+// ============================================================================
+
+struct ParticleAOS {
+    float x, y, z;
+    float vx, vy, vz;
+    float mass, life;
+};
+
+// ---- Seed helpers (deterministic, same data across layouts) ----
+
+template<typename Aos>
+static void init_particles_aos(Aos& v, size_t n) {
+    v.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        v[i].x    = float(i) * 0.01f;
+        v[i].y    = float(i) * 0.02f;
+        v[i].z    = float(i) * 0.03f;
+        v[i].vx   = 0.1f + float(i % 17) * 0.01f;
+        v[i].vy   = 0.2f + float(i % 13) * 0.01f;
+        v[i].vz   = 0.3f + float(i %  7) * 0.01f;
+        v[i].mass = 1.0f + float(i % 5);
+        v[i].life = (i % 100 == 0) ? -1.0f : (1.0f + float(i % 20));
+    }
+}
+
+template<size_t B>
+static void init_particles_aosoa(AoSoA<B, float, float, float, float, float, float, float, float>& a, size_t n) {
+    a.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        auto& blk = a.blocks[i / B];
+        const size_t o = i % B;
+        std::get<0>(blk.data)[o] = float(i) * 0.01f;
+        std::get<1>(blk.data)[o] = float(i) * 0.02f;
+        std::get<2>(blk.data)[o] = float(i) * 0.03f;
+        std::get<3>(blk.data)[o] = 0.1f + float(i % 17) * 0.01f;
+        std::get<4>(blk.data)[o] = 0.2f + float(i % 13) * 0.01f;
+        std::get<5>(blk.data)[o] = 0.3f + float(i %  7) * 0.01f;
+        std::get<6>(blk.data)[o] = 1.0f + float(i % 5);
+        std::get<7>(blk.data)[o] = (i % 100 == 0) ? -1.0f : (1.0f + float(i % 20));
+    }
+}
+
+// ---- AOS frame ----
+
+static void BM_Frame_AOS(benchmark::State& state) {
+    size_t n = state.range(0);
+    std::vector<ParticleAOS> particles;
+    init_particles_aos(particles, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        // 1. integrate
+        for (auto& p : particles) {
+            p.x    += p.vx * dt;
+            p.y    += p.vy * dt;
+            p.z    += p.vz * dt;
+            p.life -= dt;
+        }
+        // 2. kinetic energy
+        float ke = 0;
+        for (const auto& p : particles) {
+            ke += 0.5f * p.mass * (p.vx*p.vx + p.vy*p.vy + p.vz*p.vz);
+        }
+        benchmark::DoNotOptimize(ke);
+        // 3. cull dead
+        std::vector<ParticleAOS> alive;
+        alive.reserve(particles.size());
+        for (const auto& p : particles) {
+            if (p.life > 0.0f) alive.push_back(p);
+        }
+        benchmark::DoNotOptimize(alive.data());
+        // reset for next iter
+        if (alive.size() * 10 < particles.size() * 9) init_particles_aos(particles, n);
+    }
+}
+
+// ---- SOA frame ----
+
+static void BM_Frame_SOA(benchmark::State& state) {
+    size_t n = state.range(0);
+    SOA<float, float, float, float, float, float, float, float> soa;
+    soa.resize(n);
+    // Use the AOS init then copy field-by-field — keeps data identical
+    std::vector<ParticleAOS> tmp; init_particles_aos(tmp, n);
+    for (size_t i = 0; i < n; ++i) {
+        std::get<0>(soa.arrays)[i] = tmp[i].x;
+        std::get<1>(soa.arrays)[i] = tmp[i].y;
+        std::get<2>(soa.arrays)[i] = tmp[i].z;
+        std::get<3>(soa.arrays)[i] = tmp[i].vx;
+        std::get<4>(soa.arrays)[i] = tmp[i].vy;
+        std::get<5>(soa.arrays)[i] = tmp[i].vz;
+        std::get<6>(soa.arrays)[i] = tmp[i].mass;
+        std::get<7>(soa.arrays)[i] = tmp[i].life;
+    }
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        // 1. integrate — touch all 8 arrays
+        auto& X  = std::get<0>(soa.arrays);
+        auto& Y  = std::get<1>(soa.arrays);
+        auto& Z  = std::get<2>(soa.arrays);
+        auto& VX = std::get<3>(soa.arrays);
+        auto& VY = std::get<4>(soa.arrays);
+        auto& VZ = std::get<5>(soa.arrays);
+        auto& LF = std::get<7>(soa.arrays);
+        for (size_t i = 0; i < n; ++i) {
+            X[i]  += VX[i] * dt;
+            Y[i]  += VY[i] * dt;
+            Z[i]  += VZ[i] * dt;
+            LF[i] -= dt;
+        }
+        // 2. kinetic energy
+        auto& M = std::get<6>(soa.arrays);
+        float ke = 0;
+        for (size_t i = 0; i < n; ++i) {
+            ke += 0.5f * M[i] * (VX[i]*VX[i] + VY[i]*VY[i] + VZ[i]*VZ[i]);
+        }
+        benchmark::DoNotOptimize(ke);
+        // 3. cull dead — push_back into 8 separate vectors
+        SOA<float, float, float, float, float, float, float, float> alive;
+        auto& A0 = std::get<0>(alive.arrays); A0.reserve(n);
+        auto& A1 = std::get<1>(alive.arrays); A1.reserve(n);
+        auto& A2 = std::get<2>(alive.arrays); A2.reserve(n);
+        auto& A3 = std::get<3>(alive.arrays); A3.reserve(n);
+        auto& A4 = std::get<4>(alive.arrays); A4.reserve(n);
+        auto& A5 = std::get<5>(alive.arrays); A5.reserve(n);
+        auto& A6 = std::get<6>(alive.arrays); A6.reserve(n);
+        auto& A7 = std::get<7>(alive.arrays); A7.reserve(n);
+        for (size_t i = 0; i < n; ++i) {
+            if (LF[i] > 0.0f) {
+                A0.push_back(X[i]); A1.push_back(Y[i]); A2.push_back(Z[i]);
+                A3.push_back(VX[i]); A4.push_back(VY[i]); A5.push_back(VZ[i]);
+                A6.push_back(M[i]); A7.push_back(LF[i]);
+            }
+        }
+        benchmark::DoNotOptimize(A0.data());
+        if (A0.size() * 10 < n * 9) {
+            for (size_t i = 0; i < n; ++i) {
+                X[i] = tmp[i].x; Y[i] = tmp[i].y; Z[i] = tmp[i].z;
+                VX[i] = tmp[i].vx; VY[i] = tmp[i].vy; VZ[i] = tmp[i].vz;
+                M[i] = tmp[i].mass; LF[i] = tmp[i].life;
+            }
+        }
+    }
+}
+
+// ---- AoSoA frame (default for_each API) ----
+
+static void BM_Frame_AoSoA(benchmark::State& state) {
+    size_t n = state.range(0);
+    using A = AoSoA<16, float, float, float, float, float, float, float, float>;
+    A aosoa;
+    init_particles_aosoa(aosoa, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        // 1. integrate
+        aosoa.for_each([dt](auto& x, auto& y, auto& z,
+                            auto& vx, auto& vy, auto& vz,
+                            auto& /*m*/, auto& life) {
+            x    += vx * dt;
+            y    += vy * dt;
+            z    += vz * dt;
+            life -= dt;
+        });
+        // 2. kinetic energy (reduce)
+        float ke = aosoa.reduce(0.0f, [](float acc,
+                                         auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                         auto& vx, auto& vy, auto& vz,
+                                         auto& m, auto& /*life*/) {
+            return acc + 0.5f * m * (vx*vx + vy*vy + vz*vz);
+        });
+        benchmark::DoNotOptimize(ke);
+        // 3. cull dead (filter)
+        auto alive = aosoa.filter([](auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                     auto& /*vx*/, auto& /*vy*/, auto& /*vz*/,
+                                     auto& /*m*/, auto& life) {
+            return life > 0.0f;
+        });
+        benchmark::DoNotOptimize(alive.blocks.data());
+        if (alive.size() * 10 < n * 9) init_particles_aosoa(aosoa, n);
+    }
+}
+
+// ---- AoSoA frame using multistream<8> for integrate + reduce ----
+
+static void BM_Frame_AoSoA_ms(benchmark::State& state) {
+    size_t n = state.range(0);
+    using A = AoSoA<16, float, float, float, float, float, float, float, float>;
+    A aosoa;
+    init_particles_aosoa(aosoa, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        // 1. integrate via multistream — K=8 separate streams
+        aosoa.template for_each_multistream<8>([dt](auto& x, auto& y, auto& z,
+                                                     auto& vx, auto& vy, auto& vz,
+                                                     auto& /*m*/, auto& life) {
+            x    += vx * dt;
+            y    += vy * dt;
+            z    += vz * dt;
+            life -= dt;
+        });
+        // 2. kinetic energy — reduce still uses the sequential impl
+        //    (for_each_multistream for reduce would require carrying K accumulators;
+        //    out of scope — we reuse the scalar reduce here to measure honestly)
+        float ke = aosoa.reduce(0.0f, [](float acc,
+                                         auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                         auto& vx, auto& vy, auto& vz,
+                                         auto& m, auto& /*life*/) {
+            return acc + 0.5f * m * (vx*vx + vy*vy + vz*vz);
+        });
+        benchmark::DoNotOptimize(ke);
+        // 3. cull dead — filter (layout-intrinsic win for AoSoA)
+        auto alive = aosoa.filter([](auto& /*x*/, auto& /*y*/, auto& /*z*/,
+                                     auto& /*vx*/, auto& /*vy*/, auto& /*vz*/,
+                                     auto& /*m*/, auto& life) {
+            return life > 0.0f;
+        });
+        benchmark::DoNotOptimize(alive.blocks.data());
+        if (alive.size() * 10 < n * 9) init_particles_aosoa(aosoa, n);
+    }
+}
+
+BENCHMARK(BM_Frame_AOS)     ->Name("Frame/AOS")     ->Range(10'000, 1'000'000);
+BENCHMARK(BM_Frame_SOA)     ->Name("Frame/SOA")     ->Range(10'000, 1'000'000);
+BENCHMARK(BM_Frame_AoSoA)   ->Name("Frame/AoSoA")   ->Range(10'000, 1'000'000);
+BENCHMARK(BM_Frame_AoSoA_ms)->Name("Frame/AoSoA_ms")->Range(10'000, 1'000'000);
+
 BENCHMARK_MAIN();
