@@ -1924,6 +1924,157 @@ static void BM_FramePure_AoSoA(benchmark::State& state) {
     }
 }
 
+// ---- SOA with the same level of hand-optimization as AoSoA's avx2 variant ----
+//
+// The "plain" BM_FramePure_SOA uses scalar for loops and relies on GCC's
+// auto-vectorizer. For the integrate step that is fine, but for the kinetic
+// reduction GCC emits a single-accumulator vaddps chain that has a loop-
+// carried dependency on the sum (same pattern as Act 4's discovery).
+//
+// This variant writes integrate + kinetic with explicit AVX2 intrinsics and
+// TWO independent __m256 accumulators for the reduction, matching what
+// AoSoA's sum_all_f32_avx2 does. It's the fair "pushed SOA" comparison.
+#if AOSOA_HAS_AVX2
+static void BM_FramePure_SOA_avx2(benchmark::State& state) {
+    size_t n = state.range(0);
+    SOA<float, float, float, float, float, float, float, float> soa;
+    soa.resize(n);
+    std::vector<ParticleAOS> tmp; init_particles_aos(tmp, n);
+    for (size_t i = 0; i < n; ++i) {
+        std::get<0>(soa.arrays)[i] = tmp[i].x;
+        std::get<1>(soa.arrays)[i] = tmp[i].y;
+        std::get<2>(soa.arrays)[i] = tmp[i].z;
+        std::get<3>(soa.arrays)[i] = tmp[i].vx;
+        std::get<4>(soa.arrays)[i] = tmp[i].vy;
+        std::get<5>(soa.arrays)[i] = tmp[i].vz;
+        std::get<6>(soa.arrays)[i] = tmp[i].mass;
+        std::get<7>(soa.arrays)[i] = tmp[i].life;
+    }
+    const float dt_scalar = 0.016f;
+    const __m256 dt = _mm256_set1_ps(dt_scalar);
+    const __m256 half = _mm256_set1_ps(0.5f);
+
+    for (auto _ : state) {
+        float* X  = std::get<0>(soa.arrays).data();
+        float* Y  = std::get<1>(soa.arrays).data();
+        float* Z  = std::get<2>(soa.arrays).data();
+        float* VX = std::get<3>(soa.arrays).data();
+        float* VY = std::get<4>(soa.arrays).data();
+        float* VZ = std::get<5>(soa.arrays).data();
+        float* M  = std::get<6>(soa.arrays).data();
+        float* LF = std::get<7>(soa.arrays).data();
+
+        // Integrate: process 16 elements per iter with explicit loads/stores.
+        const size_t n_vec = n & ~15;
+        for (size_t i = 0; i < n_vec; i += 16) {
+            __m256 x0  = _mm256_loadu_ps(X  + i);
+            __m256 x1  = _mm256_loadu_ps(X  + i + 8);
+            __m256 y0  = _mm256_loadu_ps(Y  + i);
+            __m256 y1  = _mm256_loadu_ps(Y  + i + 8);
+            __m256 z0  = _mm256_loadu_ps(Z  + i);
+            __m256 z1  = _mm256_loadu_ps(Z  + i + 8);
+            __m256 vx0 = _mm256_loadu_ps(VX + i);
+            __m256 vx1 = _mm256_loadu_ps(VX + i + 8);
+            __m256 vy0 = _mm256_loadu_ps(VY + i);
+            __m256 vy1 = _mm256_loadu_ps(VY + i + 8);
+            __m256 vz0 = _mm256_loadu_ps(VZ + i);
+            __m256 vz1 = _mm256_loadu_ps(VZ + i + 8);
+            __m256 lf0 = _mm256_loadu_ps(LF + i);
+            __m256 lf1 = _mm256_loadu_ps(LF + i + 8);
+            _mm256_storeu_ps(X  + i    , _mm256_fmadd_ps(vx0, dt, x0));
+            _mm256_storeu_ps(X  + i + 8, _mm256_fmadd_ps(vx1, dt, x1));
+            _mm256_storeu_ps(Y  + i    , _mm256_fmadd_ps(vy0, dt, y0));
+            _mm256_storeu_ps(Y  + i + 8, _mm256_fmadd_ps(vy1, dt, y1));
+            _mm256_storeu_ps(Z  + i    , _mm256_fmadd_ps(vz0, dt, z0));
+            _mm256_storeu_ps(Z  + i + 8, _mm256_fmadd_ps(vz1, dt, z1));
+            _mm256_storeu_ps(LF + i    , _mm256_sub_ps(lf0, dt));
+            _mm256_storeu_ps(LF + i + 8, _mm256_sub_ps(lf1, dt));
+        }
+        for (size_t i = n_vec; i < n; ++i) {
+            X[i] += VX[i] * dt_scalar;
+            Y[i] += VY[i] * dt_scalar;
+            Z[i] += VZ[i] * dt_scalar;
+            LF[i] -= dt_scalar;
+        }
+
+        // Kinetic energy with 2 independent accumulators — breaks the
+        // reduction dep chain that caps the auto-vectorized version.
+        __m256 acc0 = _mm256_setzero_ps();
+        __m256 acc1 = _mm256_setzero_ps();
+        for (size_t i = 0; i < n_vec; i += 16) {
+            __m256 vx0 = _mm256_loadu_ps(VX + i);
+            __m256 vy0 = _mm256_loadu_ps(VY + i);
+            __m256 vz0 = _mm256_loadu_ps(VZ + i);
+            __m256 m0  = _mm256_loadu_ps(M  + i);
+            __m256 v2_0 = _mm256_fmadd_ps(vx0, vx0,
+                          _mm256_fmadd_ps(vy0, vy0,
+                          _mm256_mul_ps(vz0, vz0)));
+            acc0 = _mm256_fmadd_ps(_mm256_mul_ps(half, m0), v2_0, acc0);
+
+            __m256 vx1 = _mm256_loadu_ps(VX + i + 8);
+            __m256 vy1 = _mm256_loadu_ps(VY + i + 8);
+            __m256 vz1 = _mm256_loadu_ps(VZ + i + 8);
+            __m256 m1  = _mm256_loadu_ps(M  + i + 8);
+            __m256 v2_1 = _mm256_fmadd_ps(vx1, vx1,
+                          _mm256_fmadd_ps(vy1, vy1,
+                          _mm256_mul_ps(vz1, vz1)));
+            acc1 = _mm256_fmadd_ps(_mm256_mul_ps(half, m1), v2_1, acc1);
+        }
+        // Horizontal sum
+        __m256 acc = _mm256_add_ps(acc0, acc1);
+        __m128 lo = _mm256_castps256_ps128(acc);
+        __m128 hi = _mm256_extractf128_ps(acc, 1);
+        __m128 s  = _mm_add_ps(lo, hi);
+        __m128 shuf = _mm_movehdup_ps(s);
+        __m128 sums = _mm_add_ps(s, shuf);
+        shuf = _mm_movehl_ps(shuf, sums);
+        sums = _mm_add_ss(sums, shuf);
+        float ke = _mm_cvtss_f32(sums);
+        for (size_t i = n_vec; i < n; ++i) {
+            ke += 0.5f * M[i] * (VX[i]*VX[i] + VY[i]*VY[i] + VZ[i]*VZ[i]);
+        }
+        benchmark::DoNotOptimize(ke);
+    }
+}
+#endif
+
+// ---- Fair variant: use for_each_field<Is...> to match SOA's field skipping ----
+//
+// SOA's hand-written loops only touch the fields they actually need:
+//   integrate: X, Y, Z, VX, VY, VZ, LF (skips mass)
+//   kinetic:   VX, VY, VZ, M            (skips X, Y, Z, LF)
+// AoSoA's plain for_each always passes all 8 references to the lambda, which
+// means the compiler may access every field's cache line in each block.
+// for_each_field<Is...> restricts the expansion to exactly the selected
+// fields, so AoSoA touches the same field set as SOA.
+static void BM_FramePure_AoSoA_field(benchmark::State& state) {
+    size_t n = state.range(0);
+    using A = AoSoA<16, float, float, float, float, float, float, float, float>;
+    A aosoa;
+    init_particles_aosoa(aosoa, n);
+    const float dt = 0.016f;
+
+    for (auto _ : state) {
+        // integrate: only fields 0,1,2,3,4,5,7 (skip 6 = mass)
+        aosoa.template for_each_field<0, 1, 2, 3, 4, 5, 7>(
+            [dt](auto& x, auto& y, auto& z,
+                 auto& vx, auto& vy, auto& vz,
+                 auto& life) {
+                x    += vx * dt;
+                y    += vy * dt;
+                z    += vz * dt;
+                life -= dt;
+            });
+        // kinetic: only fields 3,4,5,6 (vx, vy, vz, mass)
+        float ke = 0;
+        aosoa.template for_each_field<3, 4, 5, 6>(
+            [&ke](auto& vx, auto& vy, auto& vz, auto& m) {
+                ke += 0.5f * m * (vx*vx + vy*vy + vz*vz);
+            });
+        benchmark::DoNotOptimize(ke);
+    }
+}
+
 static void BM_FramePure_AoSoA_ms(benchmark::State& state) {
     size_t n = state.range(0);
     using A = AoSoA<16, float, float, float, float, float, float, float, float>;
@@ -1950,9 +2101,13 @@ static void BM_FramePure_AoSoA_ms(benchmark::State& state) {
     }
 }
 
-BENCHMARK(BM_FramePure_AOS)     ->Name("FramePure/AOS")     ->Range(10'000, 1'000'000);
-BENCHMARK(BM_FramePure_SOA)     ->Name("FramePure/SOA")     ->Range(10'000, 1'000'000);
-BENCHMARK(BM_FramePure_AoSoA)   ->Name("FramePure/AoSoA")   ->Range(10'000, 1'000'000);
-BENCHMARK(BM_FramePure_AoSoA_ms)->Name("FramePure/AoSoA_ms")->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_AOS)        ->Name("FramePure/AOS")        ->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_SOA)        ->Name("FramePure/SOA")        ->Range(10'000, 1'000'000);
+#if AOSOA_HAS_AVX2
+BENCHMARK(BM_FramePure_SOA_avx2)   ->Name("FramePure/SOA_avx2")   ->Range(10'000, 1'000'000);
+#endif
+BENCHMARK(BM_FramePure_AoSoA)      ->Name("FramePure/AoSoA")      ->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_AoSoA_field)->Name("FramePure/AoSoA_field")->Range(10'000, 1'000'000);
+BENCHMARK(BM_FramePure_AoSoA_ms)   ->Name("FramePure/AoSoA_ms")   ->Range(10'000, 1'000'000);
 
 BENCHMARK_MAIN();
