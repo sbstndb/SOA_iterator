@@ -6,6 +6,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "aosoa.hpp"
+
 // ============================================================================
 // Type utilities
 // ============================================================================
@@ -947,6 +949,199 @@ static void BM_SOA_nopushback_Merge(benchmark::State& state) {
 }
 
 // ============================================================================
+// AoSoA initialization helpers
+// ============================================================================
+
+template<size_t B, typename... Ts, size_t... Is>
+void init_aosoa_element_impl(AoSoA<B, Ts...>& aosoa, size_t i, std::index_sequence<Is...>) {
+    using TupleType = std::tuple<Ts...>;
+    auto proxy = aosoa[i];
+    ((std::get<Is>(proxy.refs) = static_cast<std::tuple_element_t<Is, TupleType>>(i + Is)), ...);
+}
+
+template<size_t B, typename... Ts>
+void initialize_aosoa(AoSoA<B, Ts...>& aosoa, size_t n) {
+    aosoa.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        init_aosoa_element_impl(aosoa, i, std::index_sequence_for<Ts...>{});
+    }
+}
+
+template<size_t B, typename... Ts, size_t... Is>
+void init_sorted_aosoa_element_impl(AoSoA<B, Ts...>& aosoa, size_t i, int offset, std::index_sequence<Is...>) {
+    using TupleType = std::tuple<Ts...>;
+    auto proxy = aosoa[i];
+    // First field is sorted (i * 2 + offset), rest are i + Js + 1
+    std::get<0>(proxy.refs) = static_cast<std::tuple_element_t<0, TupleType>>(i * 2 + offset);
+    if constexpr (sizeof...(Ts) > 1) {
+        auto init_rest = [&]<size_t... Js>(std::index_sequence<Js...>) {
+            ((std::get<Js + 1>(proxy.refs) = static_cast<std::tuple_element_t<Js + 1, TupleType>>(i + Js + 1)), ...);
+        };
+        init_rest(std::make_index_sequence<sizeof...(Ts) - 1>{});
+    }
+    (void)sizeof...(Is); // silence unused
+}
+
+template<size_t B, typename... Ts>
+void initialize_sorted_aosoa(AoSoA<B, Ts...>& aosoa, size_t n, int offset = 0) {
+    aosoa.resize(n);
+    for (size_t i = 0; i < n; ++i) {
+        init_sorted_aosoa_element_impl(aosoa, i, offset, std::index_sequence_for<Ts...>{});
+    }
+}
+
+// ============================================================================
+// Benchmarks: AoSoA
+// ============================================================================
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_Read(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using result_t = common_t<Ts...>;
+
+    for (auto _ : state) {
+        result_t sum = 0;
+        for (auto proxy : aosoa) {
+            sum += sum_all_fields(proxy.refs);
+        }
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_Write(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    for (auto _ : state) {
+        for (auto proxy : aosoa) {
+            increment_all(proxy.refs, std::index_sequence_for<Ts...>{});
+        }
+        benchmark::ClobberMemory();
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_Compute(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using result_t = common_t<Ts...>;
+
+    for (auto _ : state) {
+        result_t result = 0;
+        for (auto proxy : aosoa) {
+            result += compute_fields_impl(proxy.refs);
+        }
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+template<size_t B, typename... Ts, size_t... Is>
+void push_back_from_aosoa_proxy(AoSoA<B, Ts...>& dest,
+                                 const typename AoSoA<B, Ts...>::Proxy& proxy,
+                                 std::index_sequence<Is...>) {
+    dest.push_back(std::get<Is>(proxy.refs)...);
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_FilterCopy(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    for (auto _ : state) {
+        AoSoA<B, Ts...> filtered;
+        filtered.reserve(size / 2);
+        for (auto proxy : aosoa) {
+            if constexpr (sizeof...(Ts) >= 2) {
+                if (std::get<0>(proxy.refs) < std::get<1>(proxy.refs)) {
+                    push_back_from_aosoa_proxy(filtered, proxy, std::index_sequence_for<Ts...>{});
+                }
+            } else {
+                if (std::get<0>(proxy.refs) > 0) {
+                    push_back_from_aosoa_proxy(filtered, proxy, std::index_sequence_for<Ts...>{});
+                }
+            }
+        }
+        benchmark::DoNotOptimize(filtered.blocks.data());
+    }
+}
+
+template<size_t B, typename... Ts, size_t... Is>
+void copy_aosoa_element(AoSoA<B, Ts...>& dest, size_t dest_idx,
+                        AoSoA<B, Ts...>& src, size_t src_idx,
+                        std::index_sequence<Is...>) {
+    auto dp = dest[dest_idx];
+    auto sp = src[src_idx];
+    ((std::get<Is>(dp.refs) = std::get<Is>(sp.refs)), ...);
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_nopb_Merge(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> a1, a2;
+    initialize_sorted_aosoa(a1, size, 0);  // 0, 2, 4, ...
+    initialize_sorted_aosoa(a2, size, 1);  // 1, 3, 5, ...
+
+    for (auto _ : state) {
+        AoSoA<B, Ts...> merged;
+        const size_t total_size = a1.size() + a2.size();
+        merged.resize(total_size);
+
+        size_t i = 0, j = 0, k = 0;
+        const size_t size1 = a1.size();
+        const size_t size2 = a2.size();
+
+        while (i < size1 && j < size2) {
+            auto p1 = a1[i];
+            auto p2 = a2[j];
+            if (std::get<0>(p1.refs) <= std::get<0>(p2.refs)) {
+                copy_aosoa_element(merged, k++, a1, i++, std::index_sequence_for<Ts...>{});
+            } else {
+                copy_aosoa_element(merged, k++, a2, j++, std::index_sequence_for<Ts...>{});
+            }
+        }
+        while (i < size1) {
+            copy_aosoa_element(merged, k++, a1, i++, std::index_sequence_for<Ts...>{});
+        }
+        while (j < size2) {
+            copy_aosoa_element(merged, k++, a2, j++, std::index_sequence_for<Ts...>{});
+        }
+
+        benchmark::DoNotOptimize(merged.blocks.data());
+    }
+}
+
+template<size_t FieldIndex, size_t B, typename... Ts>
+static void BM_AoSoA_LinearSearch(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+
+    using FieldType = std::tuple_element_t<FieldIndex, std::tuple<Ts...>>;
+    const FieldType target = static_cast<FieldType>(size / 2 + FieldIndex);
+
+    for (auto _ : state) {
+        size_t found_index = size;
+        size_t idx = 0;
+        for (auto proxy : aosoa) {
+            if (std::get<FieldIndex>(proxy.refs) == target) {
+                found_index = idx;
+                break;
+            }
+            ++idx;
+        }
+        benchmark::DoNotOptimize(found_index);
+    }
+}
+
+// ============================================================================
 // Benchmark Registration Macros
 // ============================================================================
 
@@ -982,6 +1177,16 @@ static void BM_SOA_nopushback_Merge(benchmark::State& state) {
     BENCHMARK(BM_AOS_LinearSearch<field_idx, __VA_ARGS__>)->Name("AOS_Search_f" #field_idx "/" name)->Range(10, 1000000); \
     BENCHMARK(BM_SOA_LinearSearch<field_idx, __VA_ARGS__>)->Name("SOA_Search_f" #field_idx "/" name)->Range(10, 1000000);
 
+#define REGISTER_AOSOA_BENCHMARKS(name, B, ...) \
+    BENCHMARK_TEMPLATE(BM_AoSoA_Read, B, __VA_ARGS__)->Name("AoSoA" #B "_Read/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_Write, B, __VA_ARGS__)->Name("AoSoA" #B "_Write/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_Compute, B, __VA_ARGS__)->Name("AoSoA" #B "_Compute/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_FilterCopy, B, __VA_ARGS__)->Name("AoSoA" #B "_FilterCopy/" name)->Range(1000, 1000000); \
+    BENCHMARK_TEMPLATE(BM_AoSoA_nopb_Merge, B, __VA_ARGS__)->Name("AoSoA" #B "_nopb_Merge/" name)->Range(1000, 1000000);
+
+#define REGISTER_AOSOA_SEARCH_BENCHMARKS(name, field_idx, B, ...) \
+    BENCHMARK_TEMPLATE(BM_AoSoA_LinearSearch, field_idx, B, __VA_ARGS__)->Name("AoSoA" #B "_Search_f" #field_idx "/" name)->Range(10, 1000000);
+
 // ============================================================================
 // Register benchmarks for various configurations
 // ============================================================================
@@ -1009,5 +1214,39 @@ REGISTER_ALL_BENCHMARKS("float8", float, float, float, float, float, float, floa
 REGISTER_SEARCH_BENCHMARKS("int3", 0, int, int, int)
 REGISTER_SEARCH_BENCHMARKS("float3", 0, float, float, float)
 REGISTER_SEARCH_BENCHMARKS("double3", 0, double, double, double)
+
+// ============================================================================
+// AoSoA registrations: 4 type configs x 4 block sizes
+// ============================================================================
+
+// float3 with B=4,8,16,64
+REGISTER_AOSOA_BENCHMARKS("float3", 4, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 8, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 16, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float3", 64, float, float, float)
+
+// float8 with B=4,8,16,64
+REGISTER_AOSOA_BENCHMARKS("float8", 4, float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 8, float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 16, float, float, float, float, float, float, float, float)
+REGISTER_AOSOA_BENCHMARKS("float8", 64, float, float, float, float, float, float, float, float)
+
+// double3 with B=4,8,16,64
+REGISTER_AOSOA_BENCHMARKS("double3", 4, double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 8, double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 16, double, double, double)
+REGISTER_AOSOA_BENCHMARKS("double3", 64, double, double, double)
+
+// int_float_double with B=4,8,16,64
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 4, int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 8, int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 16, int, float, double)
+REGISTER_AOSOA_BENCHMARKS("int_float_double", 64, int, float, double)
+
+// AoSoA LinearSearch benchmarks (searching on field 0)
+REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 4, float, float, float)
+REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 8, float, float, float)
+REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 16, float, float, float)
+REGISTER_AOSOA_SEARCH_BENCHMARKS("float3", 0, 64, float, float, float)
 
 BENCHMARK_MAIN();
