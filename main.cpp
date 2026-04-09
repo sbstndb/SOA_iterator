@@ -1278,6 +1278,79 @@ static void BM_AoSoA_v2_FilterCopy(benchmark::State& state) {
     }
 }
 
+// ---- Act 4: unrolled for_each variants (Agent F) ----
+
+template<size_t UNROLL, size_t B, typename... Ts>
+static void BM_AoSoA_v2_Read_uN(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    using result_t = common_t<Ts...>;
+    for (auto _ : state) {
+        result_t sum = 0;
+        aosoa.template for_each_unrolled<UNROLL>([&](auto&... xs) {
+            sum += (static_cast<result_t>(xs) + ...);
+        });
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
+template<size_t UNROLL, size_t B, typename... Ts>
+static void BM_AoSoA_v2_Compute_uN(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    using result_t = common_t<Ts...>;
+    for (auto _ : state) {
+        result_t result = 0;
+        aosoa.template for_each_unrolled<UNROLL>([&]<typename... Xs>(Xs&... xs) {
+            constexpr size_t N = sizeof...(Xs);
+            if constexpr (N == 1) {
+                result += (static_cast<result_t>(xs) + ...);
+            } else if constexpr (N == 2) {
+                result_t head = 1;
+                ((head *= static_cast<result_t>(xs)), ...);
+                result += head;
+            } else {
+                auto args = std::forward_as_tuple(xs...);
+                result_t head = static_cast<result_t>(std::get<0>(args)) *
+                                static_cast<result_t>(std::get<1>(args));
+                result_t tail = [&]<size_t... Js>(std::index_sequence<Js...>) {
+                    return (static_cast<result_t>(std::get<Js + 2>(args)) + ...);
+                }(std::make_index_sequence<N - 2>{});
+                result += head + tail;
+            }
+        });
+        benchmark::DoNotOptimize(result);
+    }
+}
+
+// ---- Act 4: AVX2 intrinsic variants (Agent G) — float-only, B=16 ----
+
+#if AOSOA_HAS_AVX2
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_Read_avx2(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    for (auto _ : state) {
+        float sum = aosoa.sum_all_f32_avx2();
+        benchmark::DoNotOptimize(sum);
+    }
+}
+
+template<size_t B, typename... Ts>
+static void BM_AoSoA_v2_Compute_avx2(benchmark::State& state) {
+    size_t size = state.range(0);
+    AoSoA<B, Ts...> aosoa;
+    initialize_aosoa(aosoa, size);
+    for (auto _ : state) {
+        float r = aosoa.compute_all_f32_avx2();
+        benchmark::DoNotOptimize(r);
+    }
+}
+#endif
+
 template<size_t FieldIndex, size_t B, typename... Ts>
 static void BM_AoSoA_v2_LinearSearch(benchmark::State& state) {
     size_t size = state.range(0);
@@ -1403,6 +1476,26 @@ REGISTER_AOSOA_BENCHMARKS("float8", 16,  float, float, float, float, float, floa
 REGISTER_AOSOA_BENCHMARKS("float8", 32,  float, float, float, float, float, float, float, float)
 REGISTER_AOSOA_BENCHMARKS("float8", 64,  float, float, float, float, float, float, float, float)
 REGISTER_AOSOA_BENCHMARKS("float8", 128, float, float, float, float, float, float, float, float)
+
+// Act 4: opt-in optimized variants for float8 at B=16 (the recommended default).
+// Unrolled for_each (Agent F) + AVX2 intrinsics with per-field accumulators
+// + SW prefetch 8-blocks-ahead (Agent G).
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_uN,    4, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Read_u4/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_uN, 4, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Compute_u4/float8")->Range(1000, 1000000);
+#if AOSOA_HAS_AVX2
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_avx2,    16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Read_avx2/float8")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_avx2, 16, float, float, float, float, float, float, float, float)
+    ->Name("AoSoA16_v2_Compute_avx2/float8")->Range(1000, 1000000);
+#endif
+
+// Same opt-in variants for float3 at B=64 (the best B for that config)
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Read_uN,    4, 64, float, float, float)
+    ->Name("AoSoA64_v2_Read_u4/float3")->Range(1000, 1000000);
+BENCHMARK_TEMPLATE(BM_AoSoA_v2_Compute_uN, 4, 64, float, float, float)
+    ->Name("AoSoA64_v2_Compute_u4/float3")->Range(1000, 1000000);
 
 // double3 with B ∈ {2, 4, 8, 16, 32, 64, 128}
 REGISTER_AOSOA_BENCHMARKS("double3", 2,   double, double, double)
